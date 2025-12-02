@@ -1,8 +1,6 @@
 import io
-import zipfile
 import tempfile
 from pathlib import Path
-
 import geopandas as gpd
 import streamlit as st
 
@@ -14,7 +12,6 @@ def geodf_to_ply_string(gdf):
     for geom in gdf.geometry:
         if geom is None:
             continue
-
         if geom.geom_type == "MultiPolygon":
             polygons = list(geom.geoms)
         elif geom.geom_type == "Polygon":
@@ -41,16 +38,9 @@ def print_gdf_details_to_streamlit(gdf):
     if gdf.crs is not None:
         try:
             epsg = gdf.crs.to_epsg()
-        except Exception:
+        except:
             epsg = None
-
-    st.write("Detected EPSG:", epsg if epsg is not None else "Unknown")
-
-    if gdf.crs is not None:
-        st.write("CRS WKT snippet:")
-        st.text(gdf.crs.to_wkt()[:400] + "...")
-    else:
-        st.write("CRS WKT snippet: None")
+    st.write("Detected EPSG:", epsg if epsg else "Unknown")
 
     st.write("Columns:", list(gdf.columns))
     st.write("Geometry types:", gdf.geometry.geom_type.value_counts())
@@ -60,82 +50,80 @@ def print_gdf_details_to_streamlit(gdf):
     st.write(gdf.head())
 
 
-def load_shapefile_from_zip(uploaded_zip):
+def load_shapefile_from_batch(files):
+    """
+    Accept multiple uploaded files, save them into a temporary
+    directory, and load the shapefile.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
-        zip_path = tmpdir / "upload.zip"
 
-        with open(zip_path, "wb") as f:
-            f.write(uploaded_zip.read())
-
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(tmpdir)
+        for f in files:
+            file_path = tmpdir / f.name
+            with open(file_path, "wb") as out:
+                out.write(f.read())
 
         shp_files = list(tmpdir.rglob("*.shp"))
         if not shp_files:
-            raise FileNotFoundError("ZIP does not contain a .shp file")
+            raise FileNotFoundError("No .shp found. Select all required shapefile components.")
 
         return gpd.read_file(shp_files[0])
 
 
 def main():
-    st.title("SHP → Geosoft PLY Converter (Streamlit Cloud)")
+    st.title("SHP → Geosoft PLY Converter (Batch Upload Mode)")
 
-    st.write(
-        "Upload a **zipped shapefile** (all files: .shp, .shx, .dbf, .prj). "
-        "The app will detect the CRS, allow reprojection, and export as Geosoft .ply."
+    st.write("Upload **all shapefile components** (.shp, .shx, .dbf, .prj, etc.) at once.")
+
+    uploaded_files = st.file_uploader(
+        "Upload shapefile components",
+        type=["shp", "shx", "dbf", "prj", "cpg"],
+        accept_multiple_files=True
     )
 
-    uploaded_zip = st.file_uploader("Upload ZIP shapefile", type=["zip"])
-
-    if uploaded_zip is None:
-        st.info("Please upload a zipped shapefile.")
+    if not uploaded_files:
+        st.info("Select all shapefile files to continue.")
         return
 
-    # Load SHP from ZIP
     try:
-        gdf = load_shapefile_from_zip(uploaded_zip)
+        gdf = load_shapefile_from_batch(uploaded_files)
     except Exception as e:
-        st.error("Failed to read shapefile: {}".format(e))
+        st.error(f"Failed to load shapefile: {e}")
         return
 
     gdf = gdf[gdf.geometry.notnull()]
     gdf = gdf[gdf.geometry.geom_type.isin(["Polygon", "MultiPolygon"])]
 
     if gdf.empty:
-        st.error("No Polygon or MultiPolygon features found in the shapefile.")
+        st.error("No polygon geometries found.")
         return
 
     print_gdf_details_to_streamlit(gdf)
 
-    epsg_detected = None
-    if gdf.crs is not None:
+    epsg = None
+    if gdf.crs:
         try:
-            epsg_detected = gdf.crs.to_epsg()
-        except Exception:
-            epsg_detected = None
+            epsg = gdf.crs.to_epsg()
+        except:
+            epsg = None
 
-    default_epsg = epsg_detected if epsg_detected is not None else 4326
+    default_epsg = epsg if epsg else 4326
 
     st.subheader("Output settings")
-
     output_epsg = st.number_input("Output EPSG", value=int(default_epsg), step=1)
-    output_filename = st.text_input("Output PLY file name", value="output.ply")
+    output_filename = st.text_input("Output PLY filename", value="output.ply")
 
     if st.button("Convert to PLY"):
         try:
             gdf_out = gdf.to_crs(epsg=int(output_epsg))
         except Exception as e:
-            st.error("Error reprojecting: {}".format(e))
+            st.error(f"CRS reprojection error: {e}")
             return
 
         ply_text = geodf_to_ply_string(gdf_out)
 
-        st.success("PLY conversion successful")
-
-        preview = "\n".join(ply_text.splitlines()[:50])
-        st.subheader("Preview (first 50 lines)")
-        st.code(preview)
+        st.success("Conversion successful!")
+        st.code("\n".join(ply_text.splitlines()[:50]), language="text")
 
         st.download_button(
             "Download PLY",
